@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <base target="_top">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Workflow 可视化编辑器 (带撤销重做)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 自定义样式 */
+        body {
+            font-family: 'Inter', sans-serif;
+            /* 使用 Inter 字体 */
+        }
+
+        #workflow-canvas {
+            position: relative;
+            overflow: auto;
+            /* 允许画布滚动 */
+            background-color: #f9fafb;
+            /* 轻微背景色 */
+            /* 添加网格背景 */
+            background-image: linear-gradient(to right, #e5e7eb 1px, transparent 1px),
+                linear-gradient(to bottom, #e5e7eb 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+
+        #svg-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            /* 初始宽度 */
+            height: 100%;
+            /* 初始高度 */
+            pointer-events: none;
+            /* SVG层不捕获鼠标事件 */
+            overflow: visible;
+            /* 允许线条超出初始视口 */
+            z-index: 1;
+            /* SVG 在节点下方 */
+        }
+
+        .workflow-node {
+            position: absolute;
+            /* 节点绝对定位 */
+            cursor: grab;
+            /* 拖动光标 */
+            min-width: 120px;
+            /* 最小宽度 */
+            transition: box-shadow 0.2s ease-in-out, transform 0.2s ease-in-out;
+            /* 过渡效果 */
+            user-select: none;
+            /* 防止拖动时选中文本 */
+            touch-action: none;
+            /* 优化触摸设备拖动 */
+            z-index: 2;
+            /* 节点在 SVG 上方 */
+        }
+
+        .workflow-node:active {
+            cursor: grabbing;
+            /* 拖动中光标 */
+            z-index: 10;
+            /* 拖动时置于顶层 */
+            transform: scale(1.03);
+            /* 轻微放大效果 */
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            /* 增加阴影 */
+        }
+
+        .workflow-node.selected {
+            box-shadow: 0 0 0 3px theme('colors.blue.500');
+            /* 选中状态边框 */
+            z-index: 5;
+        }
+
+        .property-editor {
+            transition: transform 0.3s ease-in-out;
+            /* 侧边栏过渡动画 */
+        }
+
+        .property-editor.hidden {
+            transform: translateX(100%);
+            /* 隐藏时移出屏幕 */
+        }
+
+        /* 隐藏滚动条但保留滚动功能 */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            /* IE and Edge */
+            scrollbar-width: none;
+            /* Firefox */
+        }
+
+        /* 连接线样式 - 修改为 path 并应用 marker-mid */
+        .connection-line {
+            stroke: #3b82f6;
+            /* 线条颜色保持蓝色 */
+            stroke-width: 2;
+            /* 线条宽度 */
+            stroke-dasharray: 5, 5;
+            /* 移除虚线样式，如果需要实线 */
+            fill: none;
+            marker-mid: url(#arrowhead);
+            /* 将箭头应用到路径的中间顶点 */
+        }
+
+        /* 输入框样式 */
+        .connection-input {
+            width: 100%;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid #d1d5db;
+            /* gray-300 */
+            border-radius: 0.375rem;
+            /* rounded-md */
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+            /* shadow-sm */
+            font-size: 0.875rem;
+            /* sm:text-sm */
+            line-height: 1.25rem;
+        }
+
+        .connection-input:focus {
+            outline: none;
+            border-color: #3b82f6;
+            /* focus:border-blue-500 */
+            box-shadow: 0 0 0 1px #3b82f6;
+            /* focus:ring-blue-500 */
+        }
+
+        /* 错误提示样式 (可选) */
+        .input-error {
+            border-color: theme('colors.red.500');
+        }
+
+        .error-message {
+            color: theme('colors.red.600');
+            font-size: 0.75rem;
+            /* text-xs */
+            margin-top: 0.25rem;
+            /* mt-1 */
+        }
+
+        /* 禁用按钮样式 */
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* 模态框（Modal）样式 */
+        .modal-overlay {
+            position: fixed;
+            /* 固定定位 */
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            /* 半透明黑色背景 */
+            display: flex;
+            /* 使用 flex 布局居中内容 */
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            /* 确保在最上层 */
+            visibility: hidden;
+            /* 默认隐藏 */
+            opacity: 0;
+            /* 默认透明 */
+            transition: opacity 0.3s ease, visibility 0.3s ease;
+            /* 过渡效果 */
+        }
+
+        .modal-overlay.show {
+            visibility: visible;
+            /* 显示 */
+            opacity: 1;
+            /* 不透明 */
+        }
+
+        .modal-content {
+            background-color: #fff;
+            /* 内容区域背景色 */
+            padding: 2rem;
+            /* 内边距 */
+            border-radius: 8px;
+            /* 圆角 */
+            max-width: 800px;
+            /* 最大宽度 */
+            width: 90%;
+            /* 宽度 */
+            max-height: 90%;
+            /* 最大高度 */
+            overflow-y: auto;
+            /* 内容超出时显示滚动条 */
+            position: relative;
+            /* 用于定位关闭按钮 */
+            line-height: 1.8;
+            /* 阅读模式行高 */
+            font-family: Georgia, serif;
+            /* 阅读模式字体 */
+            color: #333;
+            /* 阅读模式文字颜色 */
+            text-align: left;
+            /* 阅读模式内容左对齐 */
+        }
+
+        .modal-content h1,
+        .modal-content h2,
+        .modal-content h3 {
+            line-height: 1.5;
+            /* 调整标题行高 */
+            margin-bottom: 1rem;
+            /* 标题下方间距 */
+        }
+
+        .modal-content p {
+            margin-bottom: 1rem;
+            /* 段落下方间距 */
+        }
+
+        .close-button {
+            position: absolute;
+            /* 绝对定位 */
+            top: 10px;
+            right: 10px;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #aaa;
+            transition: color 0.2s ease;
+            z-index: 1001;
+            /* 确保关闭按钮在内容之上 */
+        }
+
+        .close-button:hover {
+            color: #777;
+        }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+
+<body class="bg-gray-100 h-screen overflow-hidden flex">
+
+    <div class="flex-1 flex flex-col relative">
+        <div class="p-3 bg-white border-b border-gray-200 shadow-sm flex space-x-2 items-center">
+            <button id="add-node-btn"
+                class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out text-sm">
+                添加节点
+            </button>
+            <button id="copy-node-btn"
+                class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out text-sm">
+                复制节点
+            </button>
+            <button id="undo-btn"
+                class="bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out text-sm"
+                disabled>
+                撤销
+            </button>
+            <button id="redo-btn"
+                class="bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out text-sm"
+                disabled>
+                重做
+            </button>
+            <button id="executeall-btn"
+                class="bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out text-sm">
+                执行全部
+            </button>
+            <button id="executecur-btn"
+                class="bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out text-sm">
+                执行当前
+            </button>
+            <div class="flex-grow"></div>
+            <div id="label-status" class="px-4 text-gray-700 text-sm font-semibold">
+                状态: 空闲
+            </div>
+            <div class="flex-grow"></div>
+            <button id="refresh-btn"
+                class="bg-blue-800 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out text-sm">
+                刷新
+            </button>
+            <button id="export-btn"
+                class="bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out text-sm">
+                导出 JSON
+            </button>
+            <label for="import-file"
+                class="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out cursor-pointer text-sm">
+                导入 JSON
+            </label>
+            <input type="file" id="import-file" accept=".json" class="hidden">
+        </div>
+
+        <div id="workflow-canvas" class="flex-1 relative no-scrollbar">
+            <svg id="svg-layer">
+                <defs>
+                    <marker id="arrowhead" markerWidth="9" markerHeight="6" refX="5" refY="2" orient="auto"
+                        markerUnits="strokeWidth">
+                        <polygon points="0 0, 6 2, 0 4" fill="#f0833e" />
+                    </marker>
+                </defs>
+            </svg>
+        </div>
+    </div>
+
+    <div id="property-editor"
+        class="w-1/3 bg-white border-l border-gray-200 shadow-lg p-6 flex flex-col hidden overflow-y-auto no-scrollbar">
+        <h2 class="text-xl font-semibold mb-6 text-gray-800">编辑节点属性</h2>
+        <input type="hidden" id="edit-node-id">
+
+        <div class="mb-4">
+            <label for="node-name" class="block text-sm font-medium text-gray-700 mb-1">名称 (唯一)</label>
+            <input type="text" id="node-name" name="node-name"
+                class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+            <p id="node-name-error" class="error-message hidden"></p>
+        </div>
+
+        <div class="mb-4">
+            <label for="node-description" class="block text-sm font-medium text-gray-700 mb-1">描述</label>
+            <textarea id="node-description" name="node-description" rows="3"
+                class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"></textarea>
+        </div>
+
+        <div class="mb-4">
+            <label for="node-content" class="block text-sm font-medium text-gray-700 mb-1">内容 (不显示在画布)</label>
+            <textarea id="node-content" name="node-content" rows="4"
+                class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"></textarea>
+        </div>
+
+        <div class="mb-4 flex items-center">
+            <label for="node-type" class="block text-sm font-medium text-gray-700 mr-2">类型</label>
+            <select id="node-type" name="node-type"
+                class="px-3 py-2 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+                <option>标准</option>
+                <option>快速</option>
+                <option>难题</option>
+                <option>图片</option>
+                <option>常数</option>
+                <option>其他</option>
+            </select>
+            <div class="flex-grow"></div>
+            <label for="node-usehistory" class="block text-sm font-medium text-gray-700 mr-2">历史记录</label>
+            <input type="checkbox" id="node-usehistory" name="node-usehistory"
+                   class="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
+        </div>
+
+        <div class="mb-4">
+            <label for="node-inputs" class="block text-sm font-medium text-gray-700 mb-1">输入节点名称 (逗号分隔)</label>
+            <input type="text" id="node-inputs" name="node-inputs" class="connection-input"
+                placeholder="例如: 开始节点,处理节点A">
+            <p id="node-inputs-error" class="error-message hidden"></p>
+        </div>
+
+        <div class="mb-4">
+            <label for="node-outputs" class="block text-sm font-medium text-gray-700 mb-1">输出节点名称 (逗号分隔)</label>
+            <input type="text" id="node-outputs" name="node-outputs" class="connection-input"
+                placeholder="例如: 处理节点B,结束节点">
+            <p id="node-outputs-error" class="error-message hidden"></p>
+        </div>
+        <div class="mt-auto pt-4 border-t border-gray-200 flex justify-center gap-x-4">
+            <button id="readingmode-btn"
+                class="w-auto bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out">阅读模式</button>
+            <button id="delete-node-btn"
+                class="w-auto bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out">删除节点</button>
+            <button id="close-editor-btn"
+                class="w-auto bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-2 px-4 rounded-lg shadow transition duration-150 ease-in-out">关闭</button>
+        </div>
+    </div>
+
+    <div id="readingModalOverlay" class="modal-overlay">
+        <div class="modal-content" id="readingModalContent">
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('workflow-canvas');
+        const svgLayer = document.getElementById('svg-layer');
+        const addNodeBtn = document.getElementById('add-node-btn');
+        const copyNodeBtn = document.getElementById('copy-node-btn');
+        const executeAllBtn = document.getElementById('executeall-btn');
+        const executeCurBtn = document.getElementById('executecur-btn');
+        const propertyEditor = document.getElementById('property-editor');
+        const closeEditorBtn = document.getElementById('close-editor-btn');
+        const deleteNodeBtn = document.getElementById('delete-node-btn');
+        const readingmodeBtn = document.getElementById('readingmode-btn');
+        const refreshBtn = document.getElementById('refresh-btn');
+        const exportBtn = document.getElementById('export-btn');
+        const importFile = document.getElementById('import-file');
+        const undoBtn = document.getElementById('undo-btn'); // 新增
+        const redoBtn = document.getElementById('redo-btn'); // 新增
+
+        const editNodeIdInput = document.getElementById('edit-node-id');
+        const nodeNameInput = document.getElementById('node-name');
+        const nodeNameError = document.getElementById('node-name-error');
+        const nodeDescriptionInput = document.getElementById('node-description');
+        const nodeContentInput = document.getElementById('node-content');
+        const nodeTypeInput = document.getElementById('node-type');
+        const nodeUseHistoryInput = document.getElementById('node-usehistory'); // 新增
+        const nodeInputsInput = document.getElementById('node-inputs');
+        const nodeInputsError = document.getElementById('node-inputs-error');
+        const nodeOutputsInput = document.getElementById('node-outputs');
+        const nodeOutputsError = document.getElementById('node-outputs-error');
+
+        const statusLabel = document.getElementById('label-status');
+
+        // 获取模态框元素
+        const modalOverlay = document.getElementById('readingModalOverlay');
+        const modalContentArea = document.getElementById('readingModalContent');
+
+
+        let nodes = {}; // 存储节点数据
+        let connections = {}; // 存储连接路径元素
+        let selectedNodeId = null;
+        let nodeIdCounter = 0;
+        let defaultNameCounter = 0;
+        let dragOffsetX = 0;
+        let dragOffsetY = 0;
+        let draggedNode = null;
+        let canvasWidth = canvas.offsetWidth;
+        let canvasHeight = canvas.offsetHeight;
+
+        // --- 撤销/重做 历史记录 ---
+        let undoStack = [];
+        let redoStack = [];
+        const MAX_HISTORY = 50; // 限制历史记录大小
+
+        // --- 辅助函数 ---
+
+        // 检查名称唯一性
+        function isNameUnique(name, currentId = null) {
+            const nameStr = String(name);
+            for (const nodeId in nodes) {
+                if (nodeId !== currentId && String(nodes[nodeId].name) === nameStr) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // 名称获取ID
+        function getNodeIdByName(name) {
+            const nameStr = String(name);
+            for (const nodeId in nodes) {
+                if (String(nodes[nodeId].name) === nameStr) {
+                    return nodeId;
+                }
+            }
+            return null;
+        }
+
+        // ID获取名称
+        function getNodeNameById(id) {
+            return nodes[id] ? nodes[id].name : null;
+        }
+
+        // 生成唯一名称
+        function generateUniqueNodeName(base = '节点') {
+            let name;
+            do {
+                defaultNameCounter++;
+                name = `${base} ${defaultNameCounter}`;
+            } while (!isNameUnique(name));
+            return name;
+        }
+
+        // 获取节点中心点
+        function getNodeCenter(nodeId) {
+            const nodeEl = canvas.querySelector(`.workflow-node[data-id="${nodeId}"]`);
+            if (!nodeEl) return null;
+            const x = parseFloat(nodeEl.style.left || 0);
+            const y = parseFloat(nodeEl.style.top || 0);
+            const width = nodeEl.offsetWidth;
+            const height = nodeEl.offsetHeight;
+            return { x: x + width / 2, y: y + height / 2 };
+        }
+
+        // 解析名称字符串
+        function parseNodeNames(nameString) {
+            if (!nameString || typeof nameString !== 'string') return [];
+            return nameString.split(',')
+                .map(name => name.trim())
+                .filter(name => name !== '');
+        }
+
+        // --- 历史记录管理 ---
+
+        // 添加到撤销栈
+        function pushToUndoStack(action) {
+            if (undoStack.length >= MAX_HISTORY) {
+                undoStack.shift(); // 移除最旧的记录
+            }
+            undoStack.push(action);
+            redoStack = []; // 清空重做栈
+            updateUndoRedoButtons();
+        }
+
+        // 更新撤销/重做按钮状态
+        function updateUndoRedoButtons() {
+            undoBtn.disabled = undoStack.length === 0;
+            redoBtn.disabled = redoStack.length === 0;
+        }
+
+        // --- 节点操作 (包含历史记录逻辑) ---
+
+        // 实际添加节点的底层函数 (供用户操作和撤销重做调用)
+        function performAddNode(nodeData, skipHistory = false) {
+            if (nodes[nodeData.id]) return; // 防止重复添加
+
+            nodes[nodeData.id] = nodeData; // 添加数据
+            const nodeEl = createNodeElement(nodeData.id, nodeData.x, nodeData.y, nodeData.name, nodeData.description, nodeData.type);
+            canvas.appendChild(nodeEl); // 添加 DOM
+
+            if (!skipHistory) {
+                pushToUndoStack({ type: 'add', nodeId: nodeData.id }); // 记录历史
+            }
+            adjustCanvasSize();
+            // 添加节点不涉及连接线重绘，除非在恢复时
+        }
+
+        // 实际删除节点的底层函数 (供用户操作和撤销重做调用)
+        function performDeleteNode(nodeId, skipHistory = false) {
+            const nodeDataToDelete = nodes[nodeId];
+            if (!nodeDataToDelete) return null; // 节点不存在
+
+            // --- 准备历史记录信息 (必须在删除数据前完成) ---
+            let historyEntry = null;
+            if (!skipHistory) {
+                // 深拷贝节点数据以供恢复
+                const clonedData = JSON.parse(JSON.stringify(nodeDataToDelete));
+                // 查找与此节点相关的连接
+                const incomingConnections = [];
+                const outgoingConnections = [];
+                for (const connId in connections) {
+                    const conn = connections[connId];
+                    const source = conn.dataset.sourceId;
+                    const target = conn.dataset.targetId;
+                    if (source === nodeId) {
+                        outgoingConnections.push({ sourceId: nodeId, targetId: target });
+                    }
+                    if (target === nodeId) {
+                        incomingConnections.push({ sourceId: source, targetId: nodeId });
+                    }
+                }
+                historyEntry = {
+                    type: 'delete',
+                    nodeData: clonedData,
+                    // 注意：这里只记录了连接关系，恢复时需要重新查找并更新其他节点的 inputs/outputs
+                    // 如果需要更精确恢复，需要保存其他节点修改前后的 inputs/outputs 状态，会更复杂
+                };
+            }
+            // --- 执行删除 ---
+
+            // 1. 从画布移除元素
+            const nodeEl = canvas.querySelector(`.workflow-node[data-id="${nodeId}"]`);
+            if (nodeEl) canvas.removeChild(nodeEl);
+
+            // 2. 删除相关连接线并更新其他节点的连接信息
+            // 移除输出连接
+            nodeDataToDelete.outputs.forEach(targetId => {
+                if (nodes[targetId]) {
+                    nodes[targetId].inputs = nodes[targetId].inputs.filter(id => id !== nodeId);
+                }
+                removeConnectionLine(nodeId, targetId);
+            });
+            // 移除输入连接
+            nodeDataToDelete.inputs.forEach(sourceId => {
+                if (nodes[sourceId]) {
+                    nodes[sourceId].outputs = nodes[sourceId].outputs.filter(id => id !== nodeId);
+                }
+                removeConnectionLine(sourceId, nodeId);
+            });
+
+            // 3. 从数据模型删除
+            delete nodes[nodeId];
+
+            // 4. 关闭编辑器（如果正在编辑此节点）
+            if (selectedNodeId === nodeId) {
+                closeEditor();
+            }
+
+            // 5. 记录历史 (如果需要)
+            if (historyEntry) {
+                pushToUndoStack(historyEntry);
+            }
+
+            adjustCanvasSize(); // 检查画布大小
+            return historyEntry; // 返回历史记录，供重做使用
+        }
+
+
+        // 创建新节点元素 (无历史记录逻辑)
+        function createNodeElement(id, x, y, name = '新节点', description = '', type = '标准') {
+            const nodeEl = document.createElement('div');
+            nodeEl.classList.add('workflow-node', 'bg-white', 'p-3', 'rounded-lg', 'shadow', 'border', 'border-gray-200', 'max-w-xs');
+            nodeEl.style.left = `${x}px`;
+            nodeEl.style.top = `${y}px`;
+            nodeEl.dataset.id = id;
+            nodeEl.innerHTML = `
+                <h3 class="node-name font-semibold text-gray-800 text-sm mb-1 truncate" title="${name}">${name}</h3>
+                <p class="node-description text-gray-600 text-xs mb-2">${description || '无描述'}</p>
+                <span class="node-type text-xs inline-block bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full">${type}</span>
+            `;
+            updateNodeTypeStyle(nodeEl, type);
+
+            nodeEl.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
+                if (e.button !== 0 && e.pointerType === 'mouse') return;
+                draggedNode = nodeEl;
+                const rect = nodeEl.getBoundingClientRect();
+                const canvasRect = canvas.getBoundingClientRect();
+                dragOffsetX = e.clientX - rect.left;
+                dragOffsetY = e.clientY - rect.top;
+                nodeEl.style.cursor = 'grabbing';
+                nodeEl.classList.add('selected');
+                selectNode(id);
+                document.addEventListener('pointermove', handlePointerMove);
+                document.addEventListener('pointerup', handlePointerUp);
+            });
+
+            nodeEl.addEventListener('pointerup', (e) => {
+                if (draggedNode === nodeEl) return;
+                selectNode(id);
+            });
+
+            return nodeEl;
+        }
+
+        // 更新节点类型样式
+        function updateNodeTypeStyle(nodeEl, type) {
+            const typeSpan = nodeEl.querySelector('.node-type');
+            if (!typeSpan) return;
+            typeSpan.className = 'node-type text-xs inline-block px-2 py-0.5 rounded-full';
+            switch (type) {
+                case '标准': typeSpan.classList.add('bg-green-100', 'text-green-800'); break;
+                case '难题': typeSpan.classList.add('bg-red-100', 'text-red-800'); break;
+                case '快速': typeSpan.classList.add('bg-blue-100', 'text-blue-800'); break;
+                case '图片': typeSpan.classList.add('bg-yellow-100', 'text-yellow-800'); break;
+                case '常数': typeSpan.classList.add('bg-purple-100', 'text-purple-800'); break;
+                case '其他': typeSpan.classList.add('bg-pink-100', 'text-pink-800'); break;
+                default: typeSpan.classList.add('bg-gray-100', 'text-gray-800'); break;
+            }
+        }
+
+
+        // 添加新节点按钮事件 (用户操作入口)
+        addNodeBtn.addEventListener('click', () => {
+            nodeIdCounter++;
+            const newNodeInternalId = `node-${nodeIdCounter}`;
+            const newNodeName = generateUniqueNodeName();
+
+            const initialX = 50 + Math.random() * (canvas.clientWidth - 200);
+            const initialY = 50 + Math.random() * (canvas.clientHeight - 150);
+
+            const newNodeData = {
+                id: newNodeInternalId,
+                x: Math.max(0, initialX),
+                y: Math.max(0, initialY),
+                name: newNodeName,
+                description: '',
+                content: '',
+                type: '标准',
+                usehistory: false, // 新增属性，默认为 false
+                inputs: [],
+                outputs: []
+            };
+
+            performAddNode(newNodeData); // 调用底层函数，会自动记录历史
+            selectNode(newNodeInternalId); // 添加后自动选中
+        });
+
+        copyNodeBtn.addEventListener('click', () => {
+            if (!selectedNodeId || !nodes[selectedNodeId])
+                return;
+            nodeIdCounter++;
+            const newNodeInternalId = `node-${nodeIdCounter}`;
+            const newNodeName = generateUniqueNodeName();
+
+            const initialX = 50 + Math.random() * (canvas.clientWidth - 200);
+            const initialY = 50 + Math.random() * (canvas.clientHeight - 150);
+
+            let newNodeData = JSON.parse(JSON.stringify(nodes[selectedNodeId]));
+            newNodeData.id = newNodeInternalId;
+            newNodeData.name = newNodeName;
+            newNodeData.x = Math.max(0, initialX);
+            newNodeData.y = Math.max(0, initialY);
+
+            performAddNode(newNodeData); // 调用底层函数，会自动记录历史
+
+            let nodeData = nodes[newNodeInternalId];
+            // Restore connections
+            nodeData.outputs.forEach(targetId => {
+                if (nodes[targetId] && !nodes[targetId].inputs.includes(nodeData.id)) {
+                    nodes[targetId].inputs.push(nodeData.id);
+                }
+            });
+            nodeData.inputs.forEach(sourceId => {
+                if (nodes[sourceId] && !nodes[sourceId].outputs.includes(nodeData.id)) {
+                    nodes[sourceId].outputs.push(nodeData.id);
+                }
+            });
+
+            selectNode(newNodeInternalId); // 添加后自动选中
+
+            drawAllConnections();
+            adjustCanvasSize();
+        });
+
+        // --- 拖动处理 (不变) ---
+        function handlePointerMove(e) {
+            if (!draggedNode) return;
+            const canvasRect = canvas.getBoundingClientRect();
+            let newX = e.clientX - canvasRect.left - dragOffsetX + canvas.scrollLeft;
+            let newY = e.clientY - canvasRect.top - dragOffsetY + canvas.scrollTop;
+            newX = Math.max(0, newX);
+            newY = Math.max(0, newY);
+            draggedNode.style.left = `${newX}px`;
+            draggedNode.style.top = `${newY}px`;
+            const nodeId = draggedNode.dataset.id;
+            if (nodes[nodeId]) {
+                nodes[nodeId].x = newX;
+                nodes[nodeId].y = newY;
+            }
+            updateConnectionsForNode(nodeId);
+            adjustCanvasSize();
+        }
+        function handlePointerUp(e) {
+            if (!draggedNode) return;
+            draggedNode.style.cursor = 'grab';
+            draggedNode = null;
+            document.removeEventListener('pointermove', handlePointerMove);
+            document.removeEventListener('pointerup', handlePointerUp);
+            adjustCanvasSize();
+            // 注意：拖动操作不记录历史
+        }
+
+        // --- 连接线绘制 (使用 Path, 不变) ---
+        function updateConnectionsForNode(nodeId) {
+            const nodeData = nodes[nodeId];
+            if (!nodeData) return;
+            nodeData.outputs.forEach(targetId => drawConnection(nodeId, targetId));
+            nodeData.inputs.forEach(sourceId => drawConnection(sourceId, nodeId));
+            updateSvgLayerBounds();
+        }
+        function drawAllConnections() {
+            let defs = svgLayer.querySelector('defs');
+            if (!defs) {
+                defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+                svgLayer.insertBefore(defs, svgLayer.firstChild);
+            }
+            let marker = defs.querySelector('#arrowhead');
+            if (!marker) {
+                marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+                marker.setAttribute('id', 'arrowhead');
+                marker.setAttribute('markerWidth', '12'); marker.setAttribute('markerHeight', '8');
+                marker.setAttribute('refX', '9'); marker.setAttribute('refY', '4');
+                marker.setAttribute('orient', 'auto'); marker.setAttribute('markerUnits', 'strokeWidth');
+                const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                polygon.setAttribute('points', '0 0, 12 4, 0 8'); polygon.setAttribute('fill', '#3b82f6');
+                marker.appendChild(polygon);
+                defs.appendChild(marker);
+            }
+            const paths = svgLayer.querySelectorAll('path.connection-line');
+            paths.forEach(path => svgLayer.removeChild(path));
+            connections = {};
+            for (const sourceId in nodes) {
+                nodes[sourceId].outputs.forEach(targetId => {
+                    if (nodes[targetId]) { drawConnection(sourceId, targetId); }
+                    else {
+                        console.warn(`目标节点 ID ${targetId} 不存在，从 ${sourceId} 的输出中移除。`);
+                        nodes[sourceId].outputs = nodes[sourceId].outputs.filter(id => id !== targetId);
+                    }
+                });
+            }
+            updateSvgLayerBounds();
+        }
+        function drawConnection(sourceId, targetId) {
+            const sourceCenter = getNodeCenter(sourceId);
+            const targetCenter = getNodeCenter(targetId);
+            if (!sourceCenter || !targetCenter) { removeConnectionLine(sourceId, targetId); return; }
+            const connectionId = `${sourceId}-${targetId}`;
+            let path = connections[connectionId];
+            if (!path) {
+                path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                path.setAttribute('class', 'connection-line');
+                path.dataset.sourceId = sourceId; path.dataset.targetId = targetId;
+                const defs = svgLayer.querySelector('defs');
+                if (defs && defs.nextSibling) { svgLayer.insertBefore(path, defs.nextSibling); }
+                else { svgLayer.appendChild(path); }
+                connections[connectionId] = path;
+            }
+            const detX = targetCenter.x - sourceCenter.x;
+            const detY = targetCenter.y - sourceCenter.y;
+            const n = 1 + Math.round(Math.abs(detX) / 60);
+            const m = 1 + Math.round(Math.abs(detY) / 60);
+            let pathData = `M ${sourceCenter.x} ${sourceCenter.y}`;
+            for (let i = 1; i <= n; i++) {
+                pathData += `L ${sourceCenter.x + detX / (n + 1) * i} ${sourceCenter.y}`;
+            }
+            pathData += `L ${targetCenter.x} ${sourceCenter.y}`;
+            for (let i = 1; i <= m; i++) {
+                pathData += `L ${targetCenter.x} ${sourceCenter.y + detY / (m + 1) * i}`;
+            }
+            pathData += `L ${targetCenter.x} ${targetCenter.y}`;
+
+            path.setAttribute('d', pathData);
+        }
+        function removeConnectionLine(sourceId, targetId) {
+            const connectionId = `${sourceId}-${targetId}`;
+            const path = connections[connectionId];
+            if (path && path.parentNode === svgLayer) {
+                svgLayer.removeChild(path);
+                delete connections[connectionId];
+            }
+        }
+        function updateSvgLayerBounds() {
+            let minX = canvasWidth, minY = canvasHeight, maxX = 0, maxY = 0;
+            Object.values(connections).forEach(path => {
+                const d = path.getAttribute('d');
+                if (d) {
+                    const points = d.match(/-?\d+(\.\d+)?/g);
+                    if (points && points.length >= 6) {
+                        const [x1, y1, x2, y2_dummy, x3_dummy, y3] = points.map(parseFloat);
+                        minX = Math.min(minX, x1, x2); minY = Math.min(minY, y1, y3);
+                        maxX = Math.max(maxX, x1, x2); maxY = Math.max(maxY, y1, y3);
+                    }
+                }
+            });
+            Object.values(nodes).forEach(node => {
+                const nodeEl = canvas.querySelector(`.workflow-node[data-id="${node.id}"]`);
+                const nodeWidth = nodeEl?.offsetWidth || 150; const nodeHeight = nodeEl?.offsetHeight || 100;
+                minX = Math.min(minX, node.x); minY = Math.min(minY, node.y);
+                maxX = Math.max(maxX, node.x + nodeWidth); maxY = Math.max(maxY, node.y + nodeHeight);
+            });
+            if (Object.keys(nodes).length === 0 && Object.keys(connections).length === 0) {
+                minX = 0; minY = 0; maxX = canvasWidth; maxY = canvasHeight;
+            }
+            const padding = 50;
+            svgLayer.style.width = `${Math.max(maxX, canvasWidth) + padding}px`;
+            svgLayer.style.height = `${Math.max(maxY, canvasHeight) + padding}px`;
+        }
+
+
+        // --- 属性编辑 (部分修改以处理连接恢复) ---
+        function selectNode(nodeId) {
+            if (selectedNodeId === nodeId && !propertyEditor.classList.contains('hidden')) return;
+            clearEditorErrors();
+            if (selectedNodeId && nodes[selectedNodeId]) {
+                const oldSelectedEl = canvas.querySelector(`.workflow-node[data-id="${selectedNodeId}"]`);
+                if (oldSelectedEl) oldSelectedEl.classList.remove('selected');
+            }
+            selectedNodeId = nodeId;
+            const nodeData = nodes[nodeId];
+            const nodeEl = canvas.querySelector(`.workflow-node[data-id="${nodeId}"]`);
+            if (nodeEl) nodeEl.classList.add('selected');
+            if (nodeData) {
+                editNodeIdInput.value = nodeId;
+                nodeNameInput.value = nodeData.name;
+                nodeDescriptionInput.value = nodeData.description;
+                nodeContentInput.value = nodeData.content;
+                nodeTypeInput.value = nodeData.type;
+                nodeUseHistoryInput.checked = nodeData.usehistory || false; // 设置历史记录单选框状态
+                const inputNames = nodeData.inputs.map(id => getNodeNameById(id)).filter(name => name).join(',');
+                const outputNames = nodeData.outputs.map(id => getNodeNameById(id)).filter(name => name).join(',');
+                nodeInputsInput.value = inputNames;
+                nodeOutputsInput.value = outputNames;
+                propertyEditor.classList.remove('hidden');
+            } else { closeEditor(); }
+        }
+        function closeEditor() {
+            propertyEditor.classList.add('hidden');
+            clearEditorErrors();
+            if (selectedNodeId) {
+                const nodeEl = canvas.querySelector(`.workflow-node[data-id="${selectedNodeId}"]`);
+                if (nodeEl) nodeEl.classList.remove('selected');
+            }
+            selectedNodeId = null;
+            editNodeIdInput.value = '';
+        }
+        function clearEditorErrors() {
+            nodeNameInput.classList.remove('input-error'); nodeNameError.classList.add('hidden'); nodeNameError.textContent = '';
+            nodeInputsInput.classList.remove('input-error'); nodeInputsError.classList.add('hidden'); nodeInputsError.textContent = '';
+            nodeOutputsInput.classList.remove('input-error'); nodeOutputsError.classList.add('hidden'); nodeOutputsError.textContent = '';
+        }
+        function showInputError(inputElement, errorElement, message) {
+            inputElement.classList.add('input-error'); errorElement.textContent = message; errorElement.classList.remove('hidden');
+        }
+        function debounce(func, wait) {
+            let timeout;
+            return function executedFunction(...args) {
+                const later = () => { clearTimeout(timeout); func(...args); };
+                clearTimeout(timeout); timeout = setTimeout(later, wait);
+            };
+        }
+        // 属性更新函数 (注意：属性编辑本身不记录历史)
+        function handleNodeUpdate() {
+            const nodeId = editNodeIdInput.value;
+            if (!nodeId || !nodes[nodeId]) return;
+            const nodeData = nodes[nodeId];
+            const nodeEl = canvas.querySelector(`.workflow-node[data-id="${nodeId}"]`);
+            clearEditorErrors();
+            let hasError = false;
+            const newName = nodeNameInput.value.trim();
+            if (!newName) { showInputError(nodeNameInput, nodeNameError, '节点名称不能为空。'); hasError = true; }
+            else if (!isNameUnique(newName, nodeId)) { showInputError(nodeNameInput, nodeNameError, `名称 "${newName}" 已被使用。`); hasError = true; }
+            const newDescription = nodeDescriptionInput.value;
+            const newContent = nodeContentInput.value;
+            const oldType = nodeData.type;
+            const newType = nodeTypeInput.value;
+            const newUseHistory = nodeUseHistoryInput.checked; // 获取历史记录单选框状态
+
+            const oldInputIds = new Set(nodeData.inputs); const oldOutputIds = new Set(nodeData.outputs);
+            const newInputIds = new Set(); const newOutputIds = new Set();
+            let connectionsChanged = false; const invalidInputNames = []; const invalidOutputNames = [];
+            const inputNames = parseNodeNames(nodeInputsInput.value);
+            inputNames.forEach(name => {
+                const targetId = getNodeIdByName(name);
+                if (targetId && targetId !== nodeId) { newInputIds.add(targetId); }
+                else if (name) { if (!getNodeIdByName(name)) { invalidInputNames.push(name); } else if (targetId === nodeId) { console.warn(`不允许自连接: ${name}`); } }
+            });
+            if (invalidInputNames.length > 0) { showInputError(nodeInputsInput, nodeInputsError, `无效输入名称: ${invalidInputNames.join(', ')}`); hasError = true; }
+            const outputNames = parseNodeNames(nodeOutputsInput.value);
+            outputNames.forEach(name => {
+                const targetId = getNodeIdByName(name);
+                if (targetId && targetId !== nodeId) { newOutputIds.add(targetId); }
+                else if (name) { if (!getNodeIdByName(name)) { invalidOutputNames.push(name); } else if (targetId === nodeId) { console.warn(`不允许自连接: ${name}`); } }
+            });
+            if (invalidOutputNames.length > 0) { showInputError(nodeOutputsInput, nodeOutputsError, `无效输出名称: ${invalidOutputNames.join(', ')}`); hasError = true; }
+
+            if (!hasError) {
+                nodeData.name = newName;
+                nodeData.description = newDescription;
+                nodeData.content = newContent;
+                nodeData.type = newType;
+                nodeData.usehistory = newUseHistory; // 更新 usehistory 属性
+
+                // 更新输入连接
+                oldInputIds.forEach(inputId => {
+                    if (!newInputIds.has(inputId) && nodes[inputId]) { nodes[inputId].outputs = nodes[inputId].outputs.filter(id => id !== nodeId); removeConnectionLine(inputId, nodeId); connectionsChanged = true; }
+                });
+                newInputIds.forEach(inputId => {
+                    if (!oldInputIds.has(inputId) && nodes[inputId]) { if (!nodes[inputId].outputs.includes(nodeId)) { nodes[inputId].outputs.push(nodeId); } connectionsChanged = true; }
+                });
+                nodeData.inputs = Array.from(newInputIds);
+                // 更新输出连接
+                oldOutputIds.forEach(outputId => {
+                    if (!newOutputIds.has(outputId) && nodes[outputId]) { nodes[outputId].inputs = nodes[outputId].inputs.filter(id => id !== nodeId); removeConnectionLine(nodeId, outputId); connectionsChanged = true; }
+                });
+                newOutputIds.forEach(outputId => {
+                    if (!oldOutputIds.has(outputId) && nodes[outputId]) { if (!nodes[outputId].inputs.includes(nodeId)) { nodes[outputId].inputs.push(nodeId); } connectionsChanged = true; }
+                });
+                nodeData.outputs = Array.from(newOutputIds);
+                // 更新节点显示
+                if (nodeEl) {
+                    nodeEl.querySelector('.node-name').textContent = nodeData.name || '未命名'; nodeEl.querySelector('.node-name').title = nodeData.name || '未命名';
+                    nodeEl.querySelector('.node-description').textContent = nodeData.description || '无描述';
+                    if (oldType !== nodeData.type) { nodeEl.querySelector('.node-type').textContent = nodeData.type; updateNodeTypeStyle(nodeEl, nodeData.type); }
+                }
+                if (connectionsChanged) { drawAllConnections(); }
+            } else { console.log("属性更新因错误被阻止。"); }
+        }
+        const debouncedUpdateNodeFromEditor = debounce(handleNodeUpdate, 300);
+
+
+        // --- 事件监听 ---
+        nodeNameInput.addEventListener('input', debouncedUpdateNodeFromEditor);
+        nodeDescriptionInput.addEventListener('input', debouncedUpdateNodeFromEditor);
+        nodeContentInput.addEventListener('input', debouncedUpdateNodeFromEditor);
+        nodeTypeInput.addEventListener('change', handleNodeUpdate);
+        nodeUseHistoryInput.addEventListener('change', handleNodeUpdate); // 监听历史记录单选框变化
+        nodeInputsInput.addEventListener('change', handleNodeUpdate);
+        nodeOutputsInput.addEventListener('change', handleNodeUpdate);
+        closeEditorBtn.addEventListener('click', closeEditor);
+
+        // 删除节点按钮事件 (用户操作入口)
+        deleteNodeBtn.addEventListener('click', () => {
+            const nodeId = editNodeIdInput.value;
+            if (!nodeId || !nodes[nodeId]) return;
+            const nodeName = nodes[nodeId].name;
+            performDeleteNode(nodeId); // 调用底层函数，会自动记录历史
+        });
+
+        // 阅读模式按钮事件
+        readingmodeBtn.addEventListener('click', () => {
+            const nodeId = editNodeIdInput.value;
+            if (!nodeId || !nodes[nodeId]) {
+                console.warn("没有选中节点或节点数据不存在。");
+                return;
+            }
+            // 获取节点的内容作为阅读模式的文本
+            const mytext = nodes[nodeId].content || '此节点没有内容可供阅读。';
+
+            // 直接设置模态框内容区域的 innerHTML，包含关闭按钮和阅读内容
+            modalContentArea.innerHTML = `
+                <span class="close-button" id="closeReadingMode">&times;</span>
+                <h2 class="text-xl font-semibold mb-4">${nodes[nodeId].name || '节点内容'}</h2>
+                <div class="reading-content">
+                    ${mytext.replace(/\n/g, '<br>')} </div>
+            `;
+
+            modalOverlay.classList.add('show'); // 添加 'show' 类显示模态框
+            document.body.style.overflow = 'hidden'; // 禁用页面滚动
+
+            // 重新获取关闭按钮的引用并添加事件监听器，因为它是动态创建的
+            const closeButton = document.getElementById('closeReadingMode');
+            if (closeButton) {
+                closeButton.addEventListener('click', closeReadingMode);
+            }
+        });
+
+        // 关闭模态框的函数
+        function closeReadingMode() {
+            modalOverlay.classList.remove('show'); // 移除 'show' 类隐藏模态框
+            document.body.style.overflow = ''; // 恢复页面滚动
+            // 可选：清空模态框内容以节省内存
+            // modalContentArea.innerHTML = '';
+        }
+
+
+        // 点击画布空白处
+        canvas.addEventListener('click', (e) => {
+            if (e.target === canvas || e.target === svgLayer) { closeEditor(); }
+        });
+
+        // 监听点击模态框背景关闭事件
+        modalOverlay.addEventListener('click', (event) => {
+            // 如果点击的是模态框背景本身，而不是内容区域
+            if (event.target === modalOverlay) {
+                closeReadingMode();
+            }
+        });
+
+        // 监听 Escape 键关闭模态框
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && modalOverlay.classList.contains('show')) {
+                closeReadingMode();
+            }
+        });
+
+        refreshBtn.addEventListener('click', () => {
+            drawAllConnections();
+            adjustCanvasSize();
+        });
+
+        // --- 导入/导出 (清空历史记录) ---
+        exportBtn.addEventListener('click', () => {
+            const workflowData = { nodes: nodes, nodeIdCounter: nodeIdCounter, defaultNameCounter: defaultNameCounter };
+            const jsonString = JSON.stringify(workflowData, null, 2);
+            const blob = new Blob([jsonString], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = 'workflow.json';
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            // 导出不清空历史
+        });
+        importFile.addEventListener('change', (event) => {
+            const file = event.target.files[0]; if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                importjsondata(JSON.parse(e.target.result));
+            };
+            reader.onerror = () => { alert('读取文件失败！'); importFile.value = ''; };
+            reader.readAsText(file);
+        });
+        function importjsondata(jsondata) {
+            try {
+                const workflowData = jsondata;
+                if (!workflowData || typeof workflowData.nodes !== 'object') { throw new Error('无效 JSON 格式'); }
+                const importedNames = new Set();
+                for (const nodeId in workflowData.nodes) {
+                    const nodeName = String(workflowData.nodes[nodeId]?.name || '');
+                    if (!nodeName) { throw new Error(`导入失败：节点 ID "${nodeId}" 缺少名称。`); }
+                    if (importedNames.has(nodeName)) { throw new Error(`导入失败：名称 "${nodeName}" 重复。`); }
+                    importedNames.add(nodeName);
+                }
+
+                // 清理工作区和历史记录
+                closeEditor();
+                canvas.querySelectorAll('.workflow-node').forEach(el => el.remove());
+                const svgDefs = svgLayer.querySelector('defs'); svgLayer.innerHTML = ''; if (svgDefs) { svgLayer.appendChild(svgDefs); }
+                nodes = {}; connections = {};
+                undoStack = []; redoStack = []; // 清空历史
+                updateUndoRedoButtons(); // 更新按钮状态
+
+                // 加载新数据
+                nodes = workflowData.nodes || {};
+                nodeIdCounter = parseInt(workflowData.nodeIdCounter || 0, 10); defaultNameCounter = parseInt(workflowData.defaultNameCounter || 0, 10);
+                if (isNaN(nodeIdCounter)) nodeIdCounter = 0; if (isNaN(defaultNameCounter)) defaultNameCounter = 0;
+
+                for (const nodeId in nodes) {
+                    const nodeData = nodes[nodeId];
+                    if (nodeData.content === undefined) nodeData.content = '';
+                    if (!Array.isArray(nodeData.inputs)) nodeData.inputs = [];
+                    if (!Array.isArray(nodeData.outputs)) nodeData.outputs = [];
+                    if (nodeData.usehistory === undefined) nodeData.usehistory = false; // 导入时处理新的 usehistory 属性
+
+                    if (!nodeData.id) nodeData.id = nodeId; if (nodeData.name === undefined) nodeData.name = `Imported ${nodeId}`;
+                    if (nodeData.x === undefined || typeof nodeData.x !== 'number') nodeData.x = 50; if (nodeData.y === undefined || typeof nodeData.y !== 'number') nodeData.y = 50;
+                    if (nodeData.type === undefined) nodeData.type = '标准';
+                    const nodeEl = createNodeElement(nodeData.id, nodeData.x, nodeData.y, nodeData.name, nodeData.description, nodeData.type);
+                    canvas.appendChild(nodeEl);
+                }
+                requestAnimationFrame(() => {
+                    // This callback runs just before the *next* repaint after the style change.
+                    // The browser will likely calculate layout/styles based on the changes by now.
+
+                    // Step 3: Request a second animation frame
+                    requestAnimationFrame(() => {
+                        // This callback runs before the *subsequent* repaint.
+                        // By the time this runs, the browser has had a chance to
+                        // perform layout and paint triggered by the initial changes.
+                        drawAllConnections(); adjustCanvasSize();
+                    });
+                });
+                alert('工作流导入成功！');
+            } catch (error) { console.error('导入失败:', error); alert(`导入失败: ${error.message}`); }
+            finally { importFile.value = ''; }
+        }
+
+        // --- 画布大小调整 (不变) ---
+        function adjustCanvasSize() {
+            let maxNodeX = 0; let maxNodeY = 0;
+            canvas.querySelectorAll('.workflow-node').forEach(nodeEl => {
+                const x = parseFloat(nodeEl.style.left || 0) + nodeEl.offsetWidth;
+                const y = parseFloat(nodeEl.style.top || 0) + nodeEl.offsetHeight;
+                maxNodeX = Math.max(maxNodeX, x); maxNodeY = Math.max(maxNodeY, y);
+            });
+            updateSvgLayerBounds();
+        }
+
+        // 窗口大小调整
+        window.addEventListener('resize', () => {
+            canvasWidth = canvas.offsetWidth; canvasHeight = canvas.offsetHeight;
+            drawAllConnections(); adjustCanvasSize();
+        });
+
+        // --- 初始化 ---
+        window.addEventListener('load', () => {
+            canvasWidth = canvas.offsetWidth; canvasHeight = canvas.offsetHeight;
+            drawAllConnections(); adjustCanvasSize();
+            updateUndoRedoButtons(); // 初始化按钮状态
+        });
+
+        // --- Undo/Redo 逻辑修正 ---
+        // 重写 undoBtn 和 redoBtn 的监听器以使用修正后的逻辑
+
+        undoBtn.addEventListener('click', () => {
+            if (undoStack.length === 0) return;
+            const lastAction = undoStack.pop();
+
+            if (lastAction.type === 'add') {
+                // 撤销添加 = 删除
+                const deletedNodeData = nodes[lastAction.nodeId]; // Get data before deleting
+                if (!deletedNodeData) { // Should not happen if stack is consistent
+                    updateUndoRedoButtons();
+                    return;
+                }
+                // Clone data for redo stack
+                const clonedDataForRedo = JSON.parse(JSON.stringify(deletedNodeData));
+
+                performDeleteNode(lastAction.nodeId, true); // Delete without history
+
+                // Push the reverse action ('add' with data) to redo stack
+                redoStack.push({ type: 'add', nodeData: clonedDataForRedo });
+
+            } else if (lastAction.type === 'delete') {
+                // 撤销删除 = 恢复
+                const nodeData = lastAction.nodeData;
+                performAddNode(nodeData, true); // Add without history
+
+                // Restore connections by updating neighbors
+                nodeData.outputs.forEach(targetId => {
+                    if (nodes[targetId] && !nodes[targetId].inputs.includes(nodeData.id)) {
+                        nodes[targetId].inputs.push(nodeData.id);
+                    }
+                });
+                nodeData.inputs.forEach(sourceId => {
+                    if (nodes[sourceId] && !nodes[sourceId].outputs.includes(nodeData.id)) {
+                        nodes[sourceId].outputs.push(nodeData.id);
+                    }
+                });
+                drawAllConnections();
+
+                // Push the reverse action ('delete' with ID) to redo stack
+                redoStack.push({ type: 'delete', nodeId: nodeData.id });
+            }
+            updateUndoRedoButtons();
+        });
+
+        redoBtn.addEventListener('click', () => {
+            if (redoStack.length === 0) return;
+            const actionToRedo = redoStack.pop();
+
+            if (actionToRedo.type === 'add') { // This 'add' comes from undoing a 'delete'
+                // Redo Add = Add the node back using stored data
+                const nodeData = actionToRedo.nodeData;
+                performAddNode(nodeData); // Add without history
+
+                // Restore connections
+                nodeData.outputs.forEach(targetId => {
+                    if (nodes[targetId] && !nodes[targetId].inputs.includes(nodeData.id)) {
+                        nodes[targetId].inputs.push(nodeData.id);
+                    }
+                });
+                nodeData.inputs.forEach(sourceId => {
+                    if (nodes[sourceId] && !nodes[sourceId].outputs.includes(nodeData.id)) {
+                        nodes[sourceId].outputs.push(nodeData.id);
+                    }
+                });
+                drawAllConnections();
+
+            } else if (actionToRedo.type === 'delete') { // This 'delete' comes from undoing an 'add'
+                // Redo Delete = Delete the node again
+                const nodeIdToDelete = actionToRedo.nodeId;
+                const nodeDataForUndo = nodes[nodeIdToDelete]; // Get data before deleting for undo stack
+                if (!nodeDataForUndo) {
+                    updateUndoRedoButtons();
+                    return; // Node already gone?
+                }
+                const clonedDataForUndo = JSON.parse(JSON.stringify(nodeDataForUndo));
+
+                performDeleteNode(nodeIdToDelete); // Delete without history
+            }
+            updateUndoRedoButtons();
+        });
+
+    </script>
+
+    <script>
+        const progressTimerDelay = 3000;
+        let progressTimer = null;
+
+        function updateStatusLabel(progress) {
+            statusLabel.textContent = '状态：' + progress;
+        }
+        function checkProgress() {
+            google.script.run.withSuccessHandler(updateStatusLabel).getProgress();
+        }
+
+        function FuncExecuteSuccess(retval) {
+            importjsondata(retval);
+            google.script.run.clearProgress();
+            clearInterval(progressTimer);
+            updateStatusLabel('空闲');
+        }
+        function FuncExecuteFail(err) {
+            console.log(err);
+            google.script.run.clearProgress();
+            clearInterval(progressTimer);
+            updateStatusLabel('空闲');
+        }
+        executeAllBtn.addEventListener('click', () => {
+            const workflowData = { nodes: nodes, nodeIdCounter: nodeIdCounter, defaultNameCounter: defaultNameCounter };
+            const jsonString = JSON.stringify(workflowData, null, 2);
+            google.script.run.withSuccessHandler(FuncExecuteSuccess).withFailureHandler(FuncExecuteFail).executeWorkflow(jsonString, []);
+            progressTimer = setInterval(checkProgress, progressTimerDelay);
+        });
+        executeCurBtn.addEventListener('click', () => {
+            if (!selectedNodeId)
+                return;
+            const workflowData = { nodes: nodes, nodeIdCounter: nodeIdCounter, defaultNameCounter: defaultNameCounter };
+            const jsonString = JSON.stringify(workflowData, null, 2);
+            google.script.run.withSuccessHandler(FuncExecuteSuccess).withFailureHandler(FuncExecuteFail).executeWorkflow(jsonString, [selectedNodeId]);
+            progressTimer = setInterval(checkProgress, progressTimerDelay);
+        });
+    </script>
+
+</body>
+
+</html>
